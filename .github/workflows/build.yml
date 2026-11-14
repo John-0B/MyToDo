@@ -8,49 +8,18 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: kivy/buildozer:latest
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up Java
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-
-    - name: Install system dependencies
+    - name: Build APK
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential git zip unzip \
-          libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
-          libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev \
-          zlib1g-dev libgstreamer1.0 gstreamer1.0-plugins-base \
-          autoconf automake libtool pkg-config cmake ninja-build \
-          libffi-dev libssl-dev libbz2-dev liblzma-dev libsqlite3-dev \
-          libncurses5-dev libncursesw5-dev libreadline-dev
-
-    - name: Install buildozer
-      run: |
-        pip install --upgrade pip
-        pip install --no-cache-dir buildozer
-        pip install --no-cache-dir "cython<3"
-
-    - name: Accept Android SDK licenses
-      run: |
-        yes | sdkmanager --licenses || true
-
-    - name: Build APK with Buildozer
-      run: |
-        yes | buildozer -v android debug
+        buildozer android debug
       env:
-        JAVA_HOME: /usr/lib/jvm/temurin-17-jdk-amd64
+        ANDROID_HOME: /opt/android-sdk
 
     - name: Upload APK artifact
       uses: actions/upload-artifact@v4
