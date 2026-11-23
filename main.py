@@ -1,18 +1,22 @@
-import subprocess
 import sys
 import os
 
-# Устанавливаем yadisk при первом запуске
+# Настройки OpenGL ТОЛЬКО для Windows. На Android это вызывает краш!
+if sys.platform == 'win32':
+    os.environ['KIVY_WINDOW'] = 'sdl2'
+    os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'
+
+# Безопасный импорт yadisk (без subprocess, который крашит Android)
 try:
     import yadisk
 except ImportError:
-    print("Устанавливаем yadisk...")
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'yadisk'])
-    import yadisk
+    print("Внимание: yadisk не установлен. Синхронизация не будет работать.")
+    yadisk = None
 
-# Настройки OpenGL для Windows-тестирования
-os.environ['KIVY_WINDOW'] = 'sdl2'
-os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'
+import json
+from datetime import datetime
+from kivy.app import App
+# ... дальше идет ваш обычный код (from kivy.uix.boxlayout import BoxLayout и т.д.)os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'
 
 import json
 from datetime import datetime
