@@ -1,12 +1,31 @@
 import sys
 import os
+import traceback
 
-# Настройки OpenGL ТОЛЬКО для Windows. На Android это вызывает краш!
+# Записываем все ошибки в файл
+def log_error(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    error_log = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    try:
+        log_path = "/sdcard/Download/mytodo_error.log"
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(error_log)
+            f.write("\n" + "="*50 + "\n")
+    except:
+        pass
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = log_error
+
+# Настройки OpenGL ТОЛЬКО для Windows
 if sys.platform == 'win32':
     os.environ['KIVY_WINDOW'] = 'sdl2'
     os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'
 
-# Безопасный импорт yadisk (без subprocess, который крашит Android)
+# Безопасный импорт yadisk
 try:
     import yadisk
 except ImportError:
@@ -27,7 +46,6 @@ from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.clock import Clock
 from kivy.metrics import dp
 from kivy.core.window import Window
-
 # --- Цвета ---
 BG_COLOR = (0.17, 0.17, 0.17, 1)
 FG_COLOR = (0.4, 0.85, 1, 1)
