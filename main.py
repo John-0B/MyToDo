@@ -1,6 +1,9 @@
 import sys
 import os
+import json
+import requests
 import traceback
+from datetime import datetime
 
 # Логирование ошибок в файл на телефоне
 def log_error(exc_type, exc_value, exc_traceback):
@@ -23,15 +26,12 @@ if sys.platform == 'win32':
     os.environ['KIVY_WINDOW'] = 'sdl2'
     os.environ['KIVY_GL_BACKEND'] = 'angle_sdl2'
 
-import json
-from datetime import datetime
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
 from kivy.uix.button import Button
 from kivy.uix.textinput import TextInput
-from kivy.uix.popup import Popup
 from kivy.uix.modalview import ModalView
 from kivy.uix.checkbox import CheckBox
 from kivy.uix.screenmanager import ScreenManager, Screen
@@ -39,6 +39,7 @@ from kivy.clock import Clock
 from kivy.metrics import dp
 from kivy.core.window import Window
 
+# --- Цвета ---
 BG_COLOR = (0.17, 0.17, 0.17, 1)
 FG_COLOR = (0.4, 0.85, 1, 1)
 TREE_BG = (0.12, 0.12, 0.12, 1)
@@ -53,6 +54,7 @@ BTN_TEAL = (0, 0.5, 0.5, 1)
 BTN_GRAY = (0.4, 0.4, 0.4, 1)
 GOLD_COLOR = (1, 0.84, 0, 1)
 
+# --- Пути ---
 def get_data_path(filename):
     try:
         app = App.get_running_app()
@@ -74,6 +76,63 @@ def get_data_path(filename):
 CONFIG_FILE_NAME = "config.json"
 LOCAL_FILE_NAME_BASE = "tree_tasks.json"
 PRIORITY_FILE_BASE = "priority.json"
+REMOTE_TASKS_PATH = "app:/tree_tasks.json"
+REMOTE_PRIORITY_PATH = "app:/priority.json"
+
+# --- Яндекс.Диск через requests ---
+def yd_get_upload_link(token, path):
+    url = "https://cloud-api.yandex.ru/v1/disk/resources/upload"
+    headers = {"Authorization": f"OAuth {token}"}
+    params = {"path": path, "overwrite": "true"}
+    r = requests.get(url, headers=headers, params=params, timeout=15)
+    r.raise_for_status()
+    return r.json()["href"]
+
+def yd_upload_file(token, remote_path, local_path):
+    href = yd_get_upload_link(token, remote_path)
+    with open(local_path, 'rb') as f:
+        r = requests.put(href, data=f, timeout=60)
+        r.raise_for_status()
+
+def yd_get_download_link(token, path):
+    url = "https://cloud-api.yandex.ru/v1/disk/resources/download"
+    headers = {"Authorization": f"OAuth {token}"}
+    params = {"path": path}
+    r = requests.get(url, headers=headers, params=params, timeout=15)
+    r.raise_for_status()
+    return r.json()["href"]
+
+def yd_download_file(token, remote_path, local_path):
+    href = yd_get_download_link(token, remote_path)
+    r = requests.get(href, timeout=60)
+    r.raise_for_status()
+    with open(local_path, 'wb') as f:
+        f.write(r.content)
+
+def yd_file_exists(token, path):
+    url = "https://cloud-api.yandex.ru/v1/disk/resources"
+    headers = {"Authorization": f"OAuth {token}"}
+    params = {"path": path}
+    r = requests.get(url, headers=headers, params=params, timeout=15)
+    return r.status_code == 200
+
+# --- Работа с данными ---
+def load_config():
+    path = get_data_path(CONFIG_FILE_NAME)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        token = config.get("yandex_token", "")
+        return token if token and token != "ВСТАВЬТЕ_ВАШ_ТОКЕН_СЮДА" else None
+    except:
+        return None
+
+def save_config(token):
+    path = get_data_path(CONFIG_FILE_NAME)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({"yandex_token": token}, f, indent=4)
 
 def load_tasks_local():
     path = get_data_path(LOCAL_FILE_NAME_BASE)
@@ -143,15 +202,17 @@ def get_task_number(tasks, task_id):
         return ""
     return ".".join([index_to_label(idx, is_root=(i==0)) for i, idx in enumerate(path)])
 
+# --- Виджет дела ---
 class TaskItem(BoxLayout):
     def __init__(self, task, depth, app, expanded=False, **kwargs):
         super().__init__(**kwargs)
-        self.task, self.depth, self.app, self.expanded = task, depth, app, expanded
-        self.orientation, self.size_hint_y, self.height = 'vertical', None, dp(75)
+        self.task, self.depth, self.app = task, depth, app
+        self.orientation, self.size_hint_y = 'vertical', None
+        self.height = dp(95)  # Увеличили высоту
         self.padding = [dp(10) * (depth + 1), dp(5), dp(10), dp(5)]
         has_children = len(task.get('children', [])) > 0
 
-        top_row = BoxLayout(size_hint_y=0.55, spacing=dp(3))
+        top_row = BoxLayout(size_hint_y=0.6, spacing=dp(3))
         if has_children:
             self.toggle_btn = Button(text="v" if expanded else ">", size_hint_x=None, width=dp(40), background_color=BTN_GRAY, color=(1,1,1,1), font_size=dp(16), bold=True)
             self.toggle_btn.bind(on_press=lambda inst: self.on_toggle_expand())
@@ -163,7 +224,18 @@ class TaskItem(BoxLayout):
         self.checkbox.bind(active=self.on_checkbox_change)
         top_row.add_widget(self.checkbox)
 
-        self.name_label = Label(text=f"{get_task_number(self.app.tasks, task['id'])}. {task['name']}", halign='left', valign='middle', color=DONE_COLOR if task['done'] else FG_COLOR, font_size=dp(14))
+        task_number = get_task_number(self.app.tasks, task['id'])
+        display_name = f"{task_number}. {task['name']}"
+        self.name_label = Label(
+            text=display_name,
+            halign='left', valign='middle',
+            color=DONE_COLOR if task['done'] else FG_COLOR,
+            font_size=dp(14),
+            shorten=True,  # ВАЖНО: сокращает длинный текст
+            shorten_from='right',
+            max_lines=1,
+            ellipsis_options={'color': FG_COLOR}
+        )
         self.name_label.bind(size=self.name_label.setter('text_size'))
         top_row.add_widget(self.name_label)
 
@@ -181,7 +253,7 @@ class TaskItem(BoxLayout):
         top_row.add_widget(add_btn)
         self.add_widget(top_row)
 
-        bottom_row = BoxLayout(size_hint_y=0.45, spacing=dp(3), padding=[dp(40), 0, 0, 0])
+        bottom_row = BoxLayout(size_hint_y=0.4, spacing=dp(3), padding=[dp(40), 0, 0, 0])
         for txt, color, action in [("Изм.", BTN_ORANGE, self.app.show_edit_dialog), ("Перен.", BTN_TEAL, self.app.show_move_dialog), ("Удал.", BTN_RED, self.app.show_delete_confirm)]:
             btn = Button(text=txt, background_color=color, color=(1,1,1,1), font_size=dp(11))
             btn.bind(on_press=lambda inst, a=action: a(task['id']))
@@ -213,6 +285,7 @@ class TaskItem(BoxLayout):
         save_priorities(self.app.priorities)
         self.app.update_priority_button()
 
+# --- Виджет приоритета ---
 class PriorityItem(BoxLayout):
     def __init__(self, task, position, total, app, **kwargs):
         super().__init__(**kwargs)
@@ -221,7 +294,7 @@ class PriorityItem(BoxLayout):
         self.padding, self.spacing = [dp(5), dp(3), dp(5), dp(3)], dp(3)
 
         self.add_widget(Label(text=f"{position}.", color=GOLD_COLOR, font_size=dp(14), bold=True, size_hint_x=None, width=dp(35)))
-        name_label = Label(text=f"{get_task_number(self.app.tasks, task['id'])}. {task['name']}", color=FG_COLOR, font_size=dp(13), halign='left')
+        name_label = Label(text=f"{get_task_number(self.app.tasks, task['id'])}. {task['name']}", color=FG_COLOR, font_size=dp(13), halign='left', shorten=True, shorten_from='right', max_lines=1)
         name_label.bind(size=name_label.setter('text_size'))
         self.add_widget(name_label)
 
@@ -269,6 +342,7 @@ class PriorityItem(BoxLayout):
             self.app.refresh_tasks()
             self.app.update_priority_button()
 
+# --- Главный экран ---
 class MainScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -277,7 +351,7 @@ class MainScreen(Screen):
         self.add_widget(layout)
 
         layout.add_widget(Label(text="Мои дела", size_hint_y=None, height=dp(40), font_size=dp(22), bold=True, color=FG_COLOR))
-        self.sync_label = Label(text="Работаем локально", size_hint_y=None, height=dp(25), font_size=dp(11), color=(0.7, 0.7, 0.7, 1))
+        self.sync_label = Label(text="Проверка облака...", size_hint_y=None, height=dp(25), font_size=dp(11), color=(0.7, 0.7, 0.7, 1))
         layout.add_widget(self.sync_label)
 
         self.focus_panel = BoxLayout(size_hint_y=None, height=dp(35), spacing=dp(5), padding=[dp(5), 0, dp(5), 0], opacity=0)
@@ -304,6 +378,22 @@ class MainScreen(Screen):
         btn_row1.add_widget(self.priority_btn)
         layout.add_widget(btn_row1)
 
+        # Кнопки синхронизации
+        btn_row2 = BoxLayout(size_hint_y=None, height=dp(45), spacing=dp(5))
+        download_btn = Button(text="⬇ Из облака", background_color=BTN_CYAN, color=(1,1,1,1), font_size=dp(13), bold=True)
+        download_btn.bind(on_press=lambda inst: App.get_running_app().sync_from_cloud())
+        btn_row2.add_widget(download_btn)
+        upload_btn = Button(text="⬆ В облако", background_color=BTN_PURPLE, color=(1,1,1,1), font_size=dp(13), bold=True)
+        upload_btn.bind(on_press=lambda inst: App.get_running_app().sync_to_cloud())
+        btn_row2.add_widget(upload_btn)
+        layout.add_widget(btn_row2)
+
+        # Кнопка настройки токена
+        token_btn = Button(text="⚙ Токен", size_hint_y=None, height=dp(35), background_color=BTN_GRAY, color=(0.7, 0.7, 0.7, 1), font_size=dp(11))
+        token_btn.bind(on_press=lambda inst: App.get_running_app().show_token_dialog())
+        layout.add_widget(token_btn)
+
+# --- Экран приоритетов ---
 class PriorityScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -322,10 +412,12 @@ class PriorityScreen(Screen):
         back_btn.bind(on_press=lambda inst: setattr(App.get_running_app().root, 'current', 'main'))
         layout.add_widget(back_btn)
 
+# --- Приложение ---
 class TodoApp(App):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.tasks, self.next_id, self.expanded_tasks, self.priorities, self.focused_task_id = [], 1, {}, [], None
+        self.yandex_token = None
 
     def build(self):
         Window.clearcolor = BG_COLOR
@@ -337,11 +429,22 @@ class TodoApp(App):
         except Exception:
             self.tasks, self.priorities = [], []
 
+        self.yandex_token = load_config()
+
         sm = ScreenManager()
         self.main_screen = MainScreen()
         self.priority_screen = PriorityScreen()
         sm.add_widget(self.main_screen)
         sm.add_widget(self.priority_screen)
+
+        if not self.yandex_token:
+            self.main_screen.sync_label.text = "Токен не настроен (нажмите ⚙ Токен)"
+            self.main_screen.sync_label.color = (1, 0.7, 0, 1)
+            Clock.schedule_once(lambda dt: self.show_token_dialog(), 0.5)
+        else:
+            self.main_screen.sync_label.text = "Готов к синхронизации"
+            self.main_screen.sync_label.color = (0.3, 1, 0.3, 1)
+
         Clock.schedule_once(lambda dt: self.refresh_tasks(), 0.3)
         return sm
 
@@ -420,18 +523,12 @@ class TodoApp(App):
             task = find_task(self.tasks, task_id)
             if task: self.priority_screen.list_container.add_widget(PriorityItem(task, idx + 1, len(self.priorities), self))
 
-    def show_add_task_dialog(self):
-        self._show_input_popup("Новое дело:", "Введите название", self.save_new_task)
-
-    def show_add_subtask_dialog(self, parent_id):
-        parent = find_task(self.tasks, parent_id)
-        if parent: self._show_input_popup(f"Поддело для \"{parent['name']}\":", "Название поддела", lambda name, pop: self.save_subtask(name, parent_id, pop))
-
-    def _show_input_popup(self, title, hint, save_action):
-        popup = ModalView(size_hint=(0.9, 0.3))
+    # --- Диалоги ввода ---
+    def _show_input_popup(self, title, hint, save_action, default_text=""):
+        popup = ModalView(size_hint=(0.9, 0.35))
         layout = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(10))
-        layout.add_widget(Label(text=title, font_size=dp(18), color=FG_COLOR))
-        input_field = TextInput(hint_text=hint, multiline=False, font_size=dp(16), background_color=TREE_BG, foreground_color=FG_COLOR)
+        layout.add_widget(Label(text=title, font_size=dp(18), color=FG_COLOR, size_hint_y=None, height=dp(30)))
+        input_field = TextInput(text=default_text, hint_text=hint, multiline=False, font_size=dp(16), background_color=TREE_BG, foreground_color=FG_COLOR)
         layout.add_widget(input_field)
         btn_row = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
         save_btn = Button(text="Сохранить", background_color=BTN_GREEN, color=(1,1,1,1))
@@ -444,6 +541,13 @@ class TodoApp(App):
         popup.add_widget(layout)
         popup.open()
         Clock.schedule_once(lambda dt: setattr(input_field, 'focus', True), 0.1)
+
+    def show_add_task_dialog(self):
+        self._show_input_popup("Новое дело:", "Введите название", self.save_new_task)
+
+    def show_add_subtask_dialog(self, parent_id):
+        parent = find_task(self.tasks, parent_id)
+        if parent: self._show_input_popup(f"Поддело для \"{parent['name']}\":", "Название поддела", lambda name, pop: self.save_subtask(name, parent_id, pop))
 
     def save_new_task(self, name, popup):
         if not name: return
@@ -475,21 +579,7 @@ class TodoApp(App):
     def show_edit_dialog(self, task_id):
         task = find_task(self.tasks, task_id)
         if not task: return
-        popup = ModalView(size_hint=(0.9, 0.3))
-        layout = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(10))
-        layout.add_widget(Label(text="Редактировать дело:", font_size=dp(18), color=FG_COLOR))
-        input_field = TextInput(text=task['name'], multiline=False, font_size=dp(16), background_color=TREE_BG, foreground_color=FG_COLOR)
-        layout.add_widget(input_field)
-        btn_row = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
-        save_btn = Button(text="Сохранить", background_color=BTN_GREEN, color=(1,1,1,1))
-        save_btn.bind(on_press=lambda inst: self.save_edit(input_field.text.strip(), task_id, popup))
-        btn_row.add_widget(save_btn)
-        cancel_btn = Button(text="Отмена", background_color=BTN_RED, color=(1,1,1,1))
-        cancel_btn.bind(on_press=lambda inst: popup.dismiss())
-        btn_row.add_widget(cancel_btn)
-        layout.add_widget(btn_row)
-        popup.add_widget(layout)
-        popup.open()
+        self._show_input_popup("Редактировать дело:", "Новое название", lambda name, pop: self.save_edit(name, task_id, pop), task['name'])
 
     def save_edit(self, new_name, task_id, popup):
         if not new_name: return
@@ -539,7 +629,6 @@ class TodoApp(App):
         scroll = ScrollView(size_hint_y=1)
         list_container = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(5))
         list_container.bind(minimum_height=list_container.setter('height'))
-        
         root_btn = Button(text="-- Корень -- (главный экран)", size_hint_y=None, height=dp(45), background_color=BTN_BLUE, color=(1,1,1,1), font_size=dp(14))
         root_btn.bind(on_press=lambda inst: self.do_move(task_id, -1, popup))
         list_container.add_widget(root_btn)
@@ -591,11 +680,121 @@ class TodoApp(App):
         self.main_screen.sync_label.text = f"Перенесено: {removed['name']}"
         self.main_screen.sync_label.color = (0.3, 1, 0.3, 1)
 
+    # --- Токен ---
+    def show_token_dialog(self):
+        popup = ModalView(size_hint=(0.92, 0.55))
+        layout = BoxLayout(orientation='vertical', padding=dp(15), spacing=dp(8))
+        layout.add_widget(Label(text="Токен Яндекс.Диска", font_size=dp(17), color=GOLD_COLOR, size_hint_y=None, height=dp(35)))
+        hint = Label(
+            text="1. Зайдите на oauth.yandex.ru\n2. Создайте приложение\n3. Выберите 'Доступ к Яндекс.Диску'\n4. Скопируйте токен и вставьте сюда",
+            font_size=dp(11), color=(0.7, 0.7, 0.7, 1), halign='left', size_hint_y=None, height=dp(80)
+        )
+        hint.bind(size=hint.setter('text_size'))
+        layout.add_widget(hint)
+        input_field = TextInput(
+            hint_text="Вставьте токен",
+            multiline=False, font_size=dp(14),
+            background_color=TREE_BG, foreground_color=FG_COLOR,
+            size_hint_y=None, height=dp(45)
+        )
+        if self.yandex_token:
+            input_field.text = self.yandex_token
+        layout.add_widget(input_field)
+        btn_row = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
+        save_btn = Button(text="Сохранить", background_color=BTN_GREEN, color=(1,1,1,1))
+        save_btn.bind(on_press=lambda inst: self.save_token(input_field.text.strip(), popup))
+        btn_row.add_widget(save_btn)
+        cancel_btn = Button(text="Отмена", background_color=BTN_GRAY, color=(1,1,1,1))
+        cancel_btn.bind(on_press=lambda inst: popup.dismiss())
+        btn_row.add_widget(cancel_btn)
+        layout.add_widget(btn_row)
+        popup.add_widget(layout)
+        popup.open()
+
+    def save_token(self, token, popup):
+        if not token:
+            self.show_error("Токен не может быть пустым")
+            return
+        try:
+            save_config(token)
+            self.yandex_token = token
+            self.main_screen.sync_label.text = "Токен сохранён ✓"
+            self.main_screen.sync_label.color = (0.3, 1, 0.3, 1)
+            popup.dismiss()
+            self.show_info("Готово", "Токен сохранён. Теперь можно синхронизировать дела с облаком.")
+        except Exception as e:
+            self.show_error(f"Ошибка сохранения:\n{e}")
+
+    # --- Синхронизация ---
+    def sync_to_cloud(self):
+        if not self.yandex_token:
+            self.show_error("Сначала настройте токен (кнопка ⚙ Токен)")
+            return
+        try:
+            self.main_screen.sync_label.text = "Загрузка в облако..."
+            self.main_screen.sync_label.color = (1, 0.7, 0, 1)
+            save_tasks_local(self.tasks)
+            save_priorities(self.priorities)
+            yd_upload_file(self.yandex_token, REMOTE_TASKS_PATH, get_data_path(LOCAL_FILE_NAME_BASE))
+            yd_upload_file(self.yandex_token, REMOTE_PRIORITY_PATH, get_data_path(PRIORITY_FILE_BASE))
+            self.main_screen.sync_label.text = f"✓ Загружено: {datetime.now().strftime('%H:%M')}"
+            self.main_screen.sync_label.color = (0.3, 1, 0.3, 1)
+            self.show_info("Успех", f"Загружено в облако:\n• Дела: {len(self.tasks)}\n• Приоритеты: {len(self.priorities)}")
+        except Exception as e:
+            self.main_screen.sync_label.text = "Ошибка загрузки"
+            self.main_screen.sync_label.color = (1, 0.3, 0.3, 1)
+            self.show_error(f"Не удалось загрузить:\n{e}")
+
+    def sync_from_cloud(self):
+        if not self.yandex_token:
+            self.show_error("Сначала настройте токен (кнопка ⚙ Токен)")
+            return
+        try:
+            self.main_screen.sync_label.text = "Загрузка из облака..."
+            self.main_screen.sync_label.color = (1, 0.7, 0, 1)
+            temp_tasks = get_data_path("temp_tasks.json")
+            temp_priority = get_data_path("temp_priority.json")
+            yd_download_file(self.yandex_token, REMOTE_TASKS_PATH, temp_tasks)
+            with open(temp_tasks, 'r', encoding='utf-8') as f:
+                self.tasks = json.load(f)
+            os.remove(temp_tasks)
+            if yd_file_exists(self.yandex_token, REMOTE_PRIORITY_PATH):
+                yd_download_file(self.yandex_token, REMOTE_PRIORITY_PATH, temp_priority)
+                with open(temp_priority, 'r', encoding='utf-8') as f:
+                    self.priorities = json.load(f).get("priorities", [])
+                os.remove(temp_priority)
+            else:
+                self.priorities = []
+            save_tasks_local(self.tasks)
+            save_priorities(self.priorities)
+            if self.tasks:
+                self.next_id = max(t['id'] for t in self.flatten_tasks(self.tasks)) + 1
+            self.refresh_tasks()
+            self.update_priority_button()
+            self.main_screen.sync_label.text = f"✓ Загружено: {len(self.tasks)} дел"
+            self.main_screen.sync_label.color = (0.3, 1, 0.3, 1)
+            self.show_info("Успех", f"Загружено из облака:\n• Дела: {len(self.tasks)}\n• Приоритеты: {len(self.priorities)}")
+        except Exception as e:
+            self.main_screen.sync_label.text = "Ошибка загрузки"
+            self.main_screen.sync_label.color = (1, 0.3, 0.3, 1)
+            self.show_error(f"Не удалось загрузить:\n{e}")
+
     def show_error(self, message):
         popup = ModalView(size_hint=(0.9, 0.3))
         layout = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(10))
-        layout.add_widget(Label(text=message, color=(1, 0.3, 0.3, 1), font_size=dp(16)))
+        layout.add_widget(Label(text=message, color=(1, 0.3, 0.3, 1), font_size=dp(16), halign='center'))
         btn = Button(text="OK", background_color=BTN_RED, color=(1,1,1,1), size_hint_y=None, height=dp(50))
+        btn.bind(on_press=lambda inst: popup.dismiss())
+        layout.add_widget(btn)
+        popup.add_widget(layout)
+        popup.open()
+
+    def show_info(self, title, message):
+        popup = ModalView(size_hint=(0.9, 0.35))
+        layout = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(10))
+        layout.add_widget(Label(text=title, color=GOLD_COLOR, font_size=dp(18), bold=True, size_hint_y=None, height=dp(30)))
+        layout.add_widget(Label(text=message, color=FG_COLOR, font_size=dp(14), halign='center'))
+        btn = Button(text="OK", background_color=BTN_BLUE, color=(1,1,1,1), size_hint_y=None, height=dp(50))
         btn.bind(on_press=lambda inst: popup.dismiss())
         layout.add_widget(btn)
         popup.add_widget(layout)
