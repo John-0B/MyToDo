@@ -540,35 +540,157 @@ class TodoApp(App):
         self.priorities = []
         self.focused_task_id = None
 
-    def build(self):
-        Window.clearcolor = BG_COLOR
+        def build(self):
+        try:
+            Window.clearcolor = BG_COLOR
+        except Exception:
+            pass
 
         if yadisk is None:
-            return Label(text="Ошибка: библиотека yadisk не найдена.\nДобавьте 'yadisk' в requirements в buildozer.spec", color=(1, 0, 0, 1), halign='center')
+            return Label(text="Ошибка: библиотека yadisk не найдена.\nДобавьте 'pypi:yadisk' в requirements в buildozer.spec", color=(1, 0, 0, 1), halign='center')
 
+        # Проверяем токен. Если не настроен — показываем экран ввода.
+        token = None
+        config_error = None
         try:
             token = load_config()
-            self.yandex_disk = yadisk.YaDisk(token=token)
+        except FileNotFoundError:
+            config_error = "no_token"
+        except ValueError:
+            config_error = "no_token"
         except Exception as e:
-            Clock.schedule_once(lambda dt: self.show_error(f"Ошибка:\n{e}"))
+            # ВАЖНО: сохраняем строку СРАЗУ, пока e существует!
+            error_msg = str(e)
+            Clock.schedule_once(lambda dt: self.show_error(f"Ошибка конфигурации:\n{error_msg}"), 0.5)
             return Label(text="Ошибка конфигурации", color=(1, 0, 0, 1), halign='center')
 
-        self.tasks = load_tasks_local()
-        self.priorities = load_priorities()
-        if self.tasks:
-            self.next_id = max(t['id'] for t in self.flatten_tasks(self.tasks)) + 1
+        if config_error == "no_token":
+            Clock.schedule_once(lambda dt: self.show_token_input(), 0.3)
+            return Label(text="Мои Дела", color=FG_COLOR, font_size=dp(22), bold=True)
+
+        # Токен есть — инициализируем облако
+        try:
+            self.yandex_disk = yadisk.YaDisk(token=token)
+        except Exception as e:
+            error_msg = str(e)
+            Clock.schedule_once(lambda dt: self.show_error(f"Ошибка подключения к облаку:\n{error_msg}"), 0.5)
+            self.yandex_disk = None
+
+        try:
+            self.tasks = load_tasks_local()
+            self.priorities = load_priorities()
+            if self.tasks:
+                self.next_id = max(t['id'] for t in self.flatten_tasks(self.tasks)) + 1
+        except Exception:
+            self.tasks = []
+            self.priorities = []
+
+        try:
+            sm = ScreenManager()
+            self.main_screen = MainScreen()
+            self.priority_screen = PriorityScreen()
+            sm.add_widget(self.main_screen)
+            sm.add_widget(self.priority_screen)
+
+            if self.yandex_disk is not None:
+                Clock.schedule_once(lambda dt: self.sync_on_startup(), 0.5)
+            else:
+                if hasattr(self, 'main_screen') and self.main_screen:
+                    self.main_screen.sync_label.text = "Облако недоступно (работаем локально)"
+                    self.main_screen.sync_label.color = (1, 0.7, 0, 1)
+
+            Clock.schedule_once(lambda dt: self.refresh_tasks(), 0.3)
+            return sm
+        except Exception as e:
+            error_msg = str(e)
+            return Label(text=f"Ошибка создания интерфейса:\n{error_msg}", color=(1, 0, 0, 1), halign='center')
+
+        def show_token_input(self):
+        popup = ModalView(size_hint=(0.92, 0.5))
+        layout = BoxLayout(orientation='vertical', padding=dp(15), spacing=dp(8))
+
+        title = Label(text="Введите токен Яндекс.Диска", font_size=dp(17), color=GOLD_COLOR, size_hint_y=None, height=dp(35))
+        layout.add_widget(title)
+
+        hint = Label(
+            text="Получить токен: Яндекс ID → Настройки →\nПриложения и API → Создать приложение\n(тип: Доступ к файлам)",
+            font_size=dp(11), color=(0.7, 0.7, 0.7, 1), halign='left', size_hint_y=None, height=dp(60)
+        )
+        hint.bind(size=hint.setter('text_size'))
+        layout.add_widget(hint)
+
+        input_field = TextInput(
+            hint_text="Вставьте токен сюда",
+            multiline=False,
+            font_size=dp(14),
+            background_color=TREE_BG,
+            foreground_color=FG_COLOR,
+            size_hint_y=None,
+            height=dp(45)
+        )
+        layout.add_widget(input_field)
+
+        btn_row = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
+        save_btn = Button(text="Сохранить", background_color=BTN_GREEN, color=(1, 1, 1, 1))
+        save_btn.bind(on_press=lambda inst: self.save_token(input_field.text, popup))
+        btn_row.add_widget(save_btn)
+
+        cancel_btn = Button(text="Позже", background_color=BTN_GRAY, color=(1, 1, 1, 1))
+        cancel_btn.bind(on_press=lambda inst: self.skip_token(popup))
+        btn_row.add_widget(cancel_btn)
+        layout.add_widget(btn_row)
+
+        popup.add_widget(layout)
+        popup.open()
+
+    def save_token(self, token, popup):
+        token = token.strip()
+        if not token:
+            return
+        path = get_data_path(CONFIG_FILE_NAME)
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump({"yandex_token": token}, f, indent=4)
+        except Exception as e:
+            self.show_error(f"Не удалось сохранить токен:\n{e}")
+            return
+
+        try:
+            self.yandex_disk = yadisk.YaDisk(token=token)
+        except Exception as e:
+            error_msg = str(e)
+            self.show_error(f"Не удалось подключиться:\n{error_msg}")
+            return
+
+        popup.dismiss()
+        self.rebuild_ui()
+        Clock.schedule_once(lambda dt: self.sync_on_startup(), 0.5)
+
+    def skip_token(self, popup):
+        popup.dismiss()
+        self.rebuild_ui()
+
+    def rebuild_ui(self):
+        try:
+            self.tasks = load_tasks_local()
+            self.priorities = load_priorities()
+            if self.tasks:
+                self.next_id = max(t['id'] for t in self.flatten_tasks(self.tasks)) + 1
+        except Exception:
+            self.tasks = []
+            self.priorities = []
 
         sm = ScreenManager()
         self.main_screen = MainScreen()
         self.priority_screen = PriorityScreen()
         sm.add_widget(self.main_screen)
         sm.add_widget(self.priority_screen)
-
-        Clock.schedule_once(lambda dt: self.sync_on_startup(), 0.5)
-        Clock.schedule_once(lambda dt: self.refresh_tasks(), 0.3)
-
-        return sm
-
+        self.root = sm
+        if self.yandex_disk is None:
+            self.main_screen.sync_label.text = "Работаем локально (без облака)"
+            self.main_screen.sync_label.color = (1, 0.7, 0, 1)
+        self.refresh_tasks()
+    
     def flatten_tasks(self, tasks):
         result = []
         for task in tasks:
