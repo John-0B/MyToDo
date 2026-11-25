@@ -5,7 +5,6 @@ import requests
 import traceback
 from datetime import datetime
 
-# Логирование ошибок в файл на телефоне
 def log_error(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
@@ -202,63 +201,73 @@ def get_task_number(tasks, task_id):
         return ""
     return ".".join([index_to_label(idx, is_root=(i==0)) for i, idx in enumerate(path)])
 
-# --- Виджет дела ---
+# --- Виджет дела (упрощённый — только сворачивание и чекбокс) ---
 class TaskItem(BoxLayout):
     def __init__(self, task, depth, app, expanded=False, **kwargs):
         super().__init__(**kwargs)
         self.task, self.depth, self.app = task, depth, app
-        self.orientation, self.size_hint_y = 'vertical', None
-        self.height = dp(95)  # Увеличили высоту
+        self.orientation, self.size_hint_y = 'horizontal', None
+        self.height = dp(55)
         self.padding = [dp(10) * (depth + 1), dp(5), dp(10), dp(5)]
+        self.spacing = dp(5)
         has_children = len(task.get('children', [])) > 0
 
-        top_row = BoxLayout(size_hint_y=0.6, spacing=dp(3))
+        # Кнопка сворачивания (только если есть поддела)
         if has_children:
-            self.toggle_btn = Button(text="v" if expanded else ">", size_hint_x=None, width=dp(40), background_color=BTN_GRAY, color=(1,1,1,1), font_size=dp(16), bold=True)
+            self.toggle_btn = Button(
+                text="v" if expanded else ">",
+                size_hint_x=None, width=dp(40),
+                background_color=BTN_GRAY, color=(1,1,1,1),
+                font_size=dp(16), bold=True
+            )
             self.toggle_btn.bind(on_press=lambda inst: self.on_toggle_expand())
-            top_row.add_widget(self.toggle_btn)
+            self.add_widget(self.toggle_btn)
         else:
-            top_row.add_widget(Label(size_hint_x=None, width=dp(40)))
+            self.add_widget(Label(size_hint_x=None, width=dp(40)))
 
-        self.checkbox = CheckBox(active=task['done'], size_hint_x=None, width=dp(40), color=DONE_COLOR)
+        # Чекбокс
+        self.checkbox = CheckBox(
+            active=task['done'],
+            size_hint_x=None, width=dp(40),
+            color=DONE_COLOR
+        )
         self.checkbox.bind(active=self.on_checkbox_change)
-        top_row.add_widget(self.checkbox)
+        self.add_widget(self.checkbox)
 
+        # Название дела (кликабельное — открывает меню действий)
         task_number = get_task_number(self.app.tasks, task['id'])
         display_name = f"{task_number}. {task['name']}"
         self.name_label = Label(
             text=display_name,
             halign='left', valign='middle',
             color=DONE_COLOR if task['done'] else FG_COLOR,
-            font_size=dp(14),
-            shorten=True,  # ВАЖНО: сокращает длинный текст
-            shorten_from='right',
-            max_lines=1,
-            ellipsis_options={'color': FG_COLOR}
+            font_size=dp(15),
+            shorten=False,
+            max_lines=2,
+            text_size=(None, None)
         )
         self.name_label.bind(size=self.name_label.setter('text_size'))
-        top_row.add_widget(self.name_label)
+        # ВАЖНО: делаем label кликабельным
+        self.name_label.bind(on_touch_down=self.on_task_click)
+        self.add_widget(self.name_label)
 
-        in_priority = task['id'] in self.app.priorities
-        self.priority_btn = Button(text="S" if in_priority else "s", size_hint_x=None, width=dp(35), background_color=BTN_GRAY, color=GOLD_COLOR, font_size=dp(16), bold=True)
-        self.priority_btn.bind(on_press=self.on_toggle_priority)
-        top_row.add_widget(self.priority_btn)
+        # Индикатор приоритета (маленькая буква S если в приоритете)
+        if task['id'] in self.app.priorities:
+            priority_indicator = Label(
+                text="S",
+                color=GOLD_COLOR,
+                font_size=dp(14),
+                bold=True,
+                size_hint_x=None, width=dp(25)
+            )
+            self.add_widget(priority_indicator)
 
-        focus_btn = Button(text="F", size_hint_x=None, width=dp(35), background_color=BTN_GRAY, color=FG_COLOR, font_size=dp(14), bold=True)
-        focus_btn.bind(on_press=lambda inst: self.app.focus_on_task(task['id']))
-        top_row.add_widget(focus_btn)
-
-        add_btn = Button(text="+", size_hint_x=None, width=dp(35), background_color=BTN_GREEN, color=(1,1,1,1), font_size=dp(18), bold=True)
-        add_btn.bind(on_press=lambda inst: self.app.show_add_subtask_dialog(task['id']))
-        top_row.add_widget(add_btn)
-        self.add_widget(top_row)
-
-        bottom_row = BoxLayout(size_hint_y=0.4, spacing=dp(3), padding=[dp(40), 0, 0, 0])
-        for txt, color, action in [("Изм.", BTN_ORANGE, self.app.show_edit_dialog), ("Перен.", BTN_TEAL, self.app.show_move_dialog), ("Удал.", BTN_RED, self.app.show_delete_confirm)]:
-            btn = Button(text=txt, background_color=color, color=(1,1,1,1), font_size=dp(11))
-            btn.bind(on_press=lambda inst, a=action: a(task['id']))
-            bottom_row.add_widget(btn)
-        self.add_widget(bottom_row)
+    def on_task_click(self, instance, touch):
+        # Проверяем, что касание внутри label
+        if self.name_label.collide_point(*touch.pos):
+            self.app.show_task_actions(self.task['id'])
+            return True
+        return False
 
     def on_toggle_expand(self):
         self.app.expanded_tasks[self.task['id']] = not self.app.expanded_tasks.get(self.task['id'], False)
@@ -275,16 +284,6 @@ class TaskItem(BoxLayout):
         self.app.refresh_tasks()
         self.app.update_priority_button()
 
-    def on_toggle_priority(self, instance):
-        if self.task['id'] in self.app.priorities:
-            self.app.priorities.remove(self.task['id'])
-            instance.text = "s"
-        else:
-            self.app.priorities.append(self.task['id'])
-            instance.text = "S"
-        save_priorities(self.app.priorities)
-        self.app.update_priority_button()
-
 # --- Виджет приоритета ---
 class PriorityItem(BoxLayout):
     def __init__(self, task, position, total, app, **kwargs):
@@ -294,7 +293,11 @@ class PriorityItem(BoxLayout):
         self.padding, self.spacing = [dp(5), dp(3), dp(5), dp(3)], dp(3)
 
         self.add_widget(Label(text=f"{position}.", color=GOLD_COLOR, font_size=dp(14), bold=True, size_hint_x=None, width=dp(35)))
-        name_label = Label(text=f"{get_task_number(self.app.tasks, task['id'])}. {task['name']}", color=FG_COLOR, font_size=dp(13), halign='left', shorten=True, shorten_from='right', max_lines=1)
+        name_label = Label(
+            text=f"{get_task_number(self.app.tasks, task['id'])}. {task['name']}",
+            color=FG_COLOR, font_size=dp(13), halign='left',
+            shorten=False, max_lines=1
+        )
         name_label.bind(size=name_label.setter('text_size'))
         self.add_widget(name_label)
 
@@ -378,18 +381,16 @@ class MainScreen(Screen):
         btn_row1.add_widget(self.priority_btn)
         layout.add_widget(btn_row1)
 
-        # Кнопки синхронизации
         btn_row2 = BoxLayout(size_hint_y=None, height=dp(45), spacing=dp(5))
-        download_btn = Button(text="⬇ Из облака", background_color=BTN_CYAN, color=(1,1,1,1), font_size=dp(13), bold=True)
+        download_btn = Button(text="↓ Загрузить", background_color=BTN_CYAN, color=(1,1,1,1), font_size=dp(13), bold=True)
         download_btn.bind(on_press=lambda inst: App.get_running_app().sync_from_cloud())
         btn_row2.add_widget(download_btn)
-        upload_btn = Button(text="⬆ В облако", background_color=BTN_PURPLE, color=(1,1,1,1), font_size=dp(13), bold=True)
+        upload_btn = Button(text="↑ Выгрузить", background_color=BTN_PURPLE, color=(1,1,1,1), font_size=dp(13), bold=True)
         upload_btn.bind(on_press=lambda inst: App.get_running_app().sync_to_cloud())
         btn_row2.add_widget(upload_btn)
         layout.add_widget(btn_row2)
 
-        # Кнопка настройки токена
-        token_btn = Button(text="⚙ Токен", size_hint_y=None, height=dp(35), background_color=BTN_GRAY, color=(0.7, 0.7, 0.7, 1), font_size=dp(11))
+        token_btn = Button(text="* Токен", size_hint_y=None, height=dp(35), background_color=BTN_GRAY, color=(0.7, 0.7, 0.7, 1), font_size=dp(11))
         token_btn.bind(on_press=lambda inst: App.get_running_app().show_token_dialog())
         layout.add_widget(token_btn)
 
@@ -438,7 +439,7 @@ class TodoApp(App):
         sm.add_widget(self.priority_screen)
 
         if not self.yandex_token:
-            self.main_screen.sync_label.text = "Токен не настроен (нажмите ⚙ Токен)"
+            self.main_screen.sync_label.text = "Токен не настроен (нажмите * Токен)"
             self.main_screen.sync_label.color = (1, 0.7, 0, 1)
             Clock.schedule_once(lambda dt: self.show_token_dialog(), 0.5)
         else:
@@ -522,6 +523,88 @@ class TodoApp(App):
         for idx, task_id in enumerate(self.priorities):
             task = find_task(self.tasks, task_id)
             if task: self.priority_screen.list_container.add_widget(PriorityItem(task, idx + 1, len(self.priorities), self))
+
+    # --- НОВОЕ: Меню действий по нажатию на дело ---
+    def show_task_actions(self, task_id):
+        task = find_task(self.tasks, task_id)
+        if not task: return
+
+        popup = ModalView(size_hint=(0.9, 0.6))
+        layout = BoxLayout(orientation='vertical', padding=dp(15), spacing=dp(10))
+
+        # Заголовок с названием дела
+        title = Label(
+            text=f"Дело: {task['name']}",
+            font_size=dp(16), color=FG_COLOR,
+            size_hint_y=None, height=dp(40),
+            halign='center'
+        )
+        title.bind(size=title.setter('text_size'))
+        layout.add_widget(title)
+
+        # Сетка кнопок 2x3
+        btn_grid = BoxLayout(orientation='vertical', spacing=dp(8))
+
+        # Первый ряд
+        row1 = BoxLayout(spacing=dp(8))
+        edit_btn = Button(text="Изм.", background_color=BTN_ORANGE, color=(1,1,1,1), font_size=dp(14), bold=True)
+        edit_btn.bind(on_press=lambda inst: (popup.dismiss(), self.show_edit_dialog(task_id)))
+        row1.add_widget(edit_btn)
+
+        move_btn = Button(text="Перен.", background_color=BTN_TEAL, color=(1,1,1,1), font_size=dp(14), bold=True)
+        move_btn.bind(on_press=lambda inst: (popup.dismiss(), self.show_move_dialog(task_id)))
+        row1.add_widget(move_btn)
+
+        btn_grid.add_widget(row1)
+
+        # Второй ряд
+        row2 = BoxLayout(spacing=dp(8))
+        delete_btn = Button(text="Удал.", background_color=BTN_RED, color=(1,1,1,1), font_size=dp(14), bold=True)
+        delete_btn.bind(on_press=lambda inst: (popup.dismiss(), self.show_delete_confirm(task_id)))
+        row2.add_widget(delete_btn)
+
+        focus_btn = Button(text="Фокус", background_color=BTN_BLUE, color=(1,1,1,1), font_size=dp(14), bold=True)
+        focus_btn.bind(on_press=lambda inst: (popup.dismiss(), self.focus_on_task(task_id)))
+        row2.add_widget(focus_btn)
+
+        btn_grid.add_widget(row2)
+
+        # Третий ряд
+        row3 = BoxLayout(spacing=dp(8))
+        in_priority = task_id in self.priorities
+        priority_btn = Button(
+            text="Убрать S" if in_priority else "Добавить S",
+            background_color=GOLD_COLOR if in_priority else BTN_GRAY,
+            color=(0,0,0,1) if in_priority else GOLD_COLOR,
+            font_size=dp(14), bold=True
+        )
+        priority_btn.bind(on_press=lambda inst: (popup.dismiss(), self.toggle_priority(task_id)))
+        row3.add_widget(priority_btn)
+
+        add_subtask_btn = Button(text="+ Поддело", background_color=BTN_GREEN, color=(1,1,1,1), font_size=dp(14), bold=True)
+        add_subtask_btn.bind(on_press=lambda inst: (popup.dismiss(), self.show_add_subtask_dialog(task_id)))
+        row3.add_widget(add_subtask_btn)
+
+        btn_grid.add_widget(row3)
+
+        layout.add_widget(btn_grid)
+
+        # Кнопка закрыть
+        close_btn = Button(text="Закрыть", background_color=BTN_GRAY, color=(1,1,1,1), size_hint_y=None, height=dp(45), font_size=dp(14))
+        close_btn.bind(on_press=lambda inst: popup.dismiss())
+        layout.add_widget(close_btn)
+
+        popup.add_widget(layout)
+        popup.open()
+
+    def toggle_priority(self, task_id):
+        if task_id in self.priorities:
+            self.priorities.remove(task_id)
+        else:
+            self.priorities.append(task_id)
+        save_priorities(self.priorities)
+        self.refresh_tasks()
+        self.update_priority_button()
 
     # --- Диалоги ввода ---
     def _show_input_popup(self, title, hint, save_action, default_text=""):
@@ -718,7 +801,7 @@ class TodoApp(App):
         try:
             save_config(token)
             self.yandex_token = token
-            self.main_screen.sync_label.text = "Токен сохранён ✓"
+            self.main_screen.sync_label.text = "Токен сохранён [OK]"
             self.main_screen.sync_label.color = (0.3, 1, 0.3, 1)
             popup.dismiss()
             self.show_info("Готово", "Токен сохранён. Теперь можно синхронизировать дела с облаком.")
@@ -728,7 +811,7 @@ class TodoApp(App):
     # --- Синхронизация ---
     def sync_to_cloud(self):
         if not self.yandex_token:
-            self.show_error("Сначала настройте токен (кнопка ⚙ Токен)")
+            self.show_error("Сначала настройте токен (кнопка * Токен)")
             return
         try:
             self.main_screen.sync_label.text = "Загрузка в облако..."
@@ -737,7 +820,7 @@ class TodoApp(App):
             save_priorities(self.priorities)
             yd_upload_file(self.yandex_token, REMOTE_TASKS_PATH, get_data_path(LOCAL_FILE_NAME_BASE))
             yd_upload_file(self.yandex_token, REMOTE_PRIORITY_PATH, get_data_path(PRIORITY_FILE_BASE))
-            self.main_screen.sync_label.text = f"✓ Загружено: {datetime.now().strftime('%H:%M')}"
+            self.main_screen.sync_label.text = f"[OK] Загружено: {datetime.now().strftime('%H:%M')}"
             self.main_screen.sync_label.color = (0.3, 1, 0.3, 1)
             self.show_info("Успех", f"Загружено в облако:\n• Дела: {len(self.tasks)}\n• Приоритеты: {len(self.priorities)}")
         except Exception as e:
@@ -747,7 +830,7 @@ class TodoApp(App):
 
     def sync_from_cloud(self):
         if not self.yandex_token:
-            self.show_error("Сначала настройте токен (кнопка ⚙ Токен)")
+            self.show_error("Сначала настройте токен (кнопка * Токен)")
             return
         try:
             self.main_screen.sync_label.text = "Загрузка из облака..."
@@ -771,7 +854,7 @@ class TodoApp(App):
                 self.next_id = max(t['id'] for t in self.flatten_tasks(self.tasks)) + 1
             self.refresh_tasks()
             self.update_priority_button()
-            self.main_screen.sync_label.text = f"✓ Загружено: {len(self.tasks)} дел"
+            self.main_screen.sync_label.text = f"[OK] Загружено: {len(self.tasks)} дел"
             self.main_screen.sync_label.color = (0.3, 1, 0.3, 1)
             self.show_info("Успех", f"Загружено из облака:\n• Дела: {len(self.tasks)}\n• Приоритеты: {len(self.priorities)}")
         except Exception as e:
