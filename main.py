@@ -201,18 +201,18 @@ def get_task_number(tasks, task_id):
         return ""
     return ".".join([index_to_label(idx, is_root=(i==0)) for i, idx in enumerate(path)])
 
-# --- Виджет дела (упрощённый — только сворачивание и чекбокс) ---
+# --- Виджет дела (основной список) ---
 class TaskItem(BoxLayout):
     def __init__(self, task, depth, app, expanded=False, **kwargs):
         super().__init__(**kwargs)
         self.task, self.depth, self.app = task, depth, app
         self.orientation, self.size_hint_y = 'horizontal', None
-        self.height = dp(55)
-        self.padding = [dp(10) * (depth + 1), dp(5), dp(10), dp(5)]
+        self.height = dp(80)
+        # ИСПРАВЛЕНО: минимальный отступ слева для всех уровней (поддела сдвинуты влево до упора)
+        self.padding = [dp(5), dp(5), dp(10), dp(5)]
         self.spacing = dp(5)
         has_children = len(task.get('children', [])) > 0
 
-        # Кнопка сворачивания (только если есть поддела)
         if has_children:
             self.toggle_btn = Button(
                 text="v" if expanded else ">",
@@ -225,7 +225,6 @@ class TaskItem(BoxLayout):
         else:
             self.add_widget(Label(size_hint_x=None, width=dp(40)))
 
-        # Чекбокс
         self.checkbox = CheckBox(
             active=task['done'],
             size_hint_x=None, width=dp(40),
@@ -234,24 +233,20 @@ class TaskItem(BoxLayout):
         self.checkbox.bind(active=self.on_checkbox_change)
         self.add_widget(self.checkbox)
 
-        # Название дела (кликабельное — открывает меню действий)
         task_number = get_task_number(self.app.tasks, task['id'])
         display_name = f"{task_number}. {task['name']}"
         self.name_label = Label(
             text=display_name,
-            halign='left', valign='middle',
+            halign='left', valign='top',
             color=DONE_COLOR if task['done'] else FG_COLOR,
             font_size=dp(15),
             shorten=False,
-            max_lines=2,
-            text_size=(None, None)
+            max_lines=3,
         )
         self.name_label.bind(size=self.name_label.setter('text_size'))
-        # ВАЖНО: делаем label кликабельным
         self.name_label.bind(on_touch_down=self.on_task_click)
         self.add_widget(self.name_label)
 
-        # Индикатор приоритета (маленькая буква S если в приоритете)
         if task['id'] in self.app.priorities:
             priority_indicator = Label(
                 text="S",
@@ -263,7 +258,6 @@ class TaskItem(BoxLayout):
             self.add_widget(priority_indicator)
 
     def on_task_click(self, instance, touch):
-        # Проверяем, что касание внутри label
         if self.name_label.collide_point(*touch.pos):
             self.app.show_task_actions(self.task['id'])
             return True
@@ -289,61 +283,57 @@ class PriorityItem(BoxLayout):
     def __init__(self, task, position, total, app, **kwargs):
         super().__init__(**kwargs)
         self.task, self.position, self.total, self.app = task, position, total, app
-        self.orientation, self.size_hint_y, self.height = 'horizontal', None, dp(50)
-        self.padding, self.spacing = [dp(5), dp(3), dp(5), dp(3)], dp(3)
+        self.orientation, self.size_hint_y = 'horizontal', None
+        self.height = dp(70)
+        self.padding, self.spacing = [dp(10), dp(5), dp(10), dp(5)], dp(5)
 
-        self.add_widget(Label(text=f"{position}.", color=GOLD_COLOR, font_size=dp(14), bold=True, size_hint_x=None, width=dp(35)))
-        name_label = Label(
-            text=f"{get_task_number(self.app.tasks, task['id'])}. {task['name']}",
-            color=FG_COLOR, font_size=dp(13), halign='left',
-            shorten=False, max_lines=1
+        pos_label = Label(
+            text=f"{position}.",
+            color=GOLD_COLOR,
+            font_size=dp(16),
+            bold=True,
+            size_hint_x=None, width=dp(35)
         )
-        name_label.bind(size=name_label.setter('text_size'))
-        self.add_widget(name_label)
+        self.add_widget(pos_label)
 
-        for txt, color, action, disabled in [
-            ("^", FG_COLOR, self.on_move_up, position == 1),
-            ("v", FG_COLOR, self.on_move_down, position == total),
-            ("D", DONE_COLOR, self.on_mark_done, False),
-            ("X", BTN_RED, self.on_remove, False)
-        ]:
-            btn = Button(text=txt, size_hint_x=None, width=dp(40), background_color=BTN_GRAY, color=(0.3,0.3,0.3,1) if disabled else color, font_size=dp(16), bold=True, disabled=disabled)
-            btn.bind(on_press=lambda inst, a=action: a())
-            self.add_widget(btn)
+        self.checkbox = CheckBox(
+            active=task['done'],
+            size_hint_x=None, width=dp(40),
+            color=DONE_COLOR
+        )
+        self.checkbox.bind(active=self.on_checkbox_change)
+        self.add_widget(self.checkbox)
 
-    def on_move_up(self):
-        if self.position > 1:
-            idx = self.position - 1
-            self.app.priorities[idx], self.app.priorities[idx-1] = self.app.priorities[idx-1], self.app.priorities[idx]
-            save_priorities(self.app.priorities)
-            self.app.refresh_priority_screen()
+        task_number = get_task_number(self.app.tasks, task['id'])
+        display_name = f"{task_number}. {task['name']}"
+        self.name_label = Label(
+            text=display_name,
+            halign='left', valign='top',
+            color=DONE_COLOR if task['done'] else FG_COLOR,
+            font_size=dp(15),
+            shorten=False,
+            max_lines=2,
+        )
+        self.name_label.bind(size=self.name_label.setter('text_size'))
+        self.name_label.bind(on_touch_down=self.on_task_click)
+        self.add_widget(self.name_label)
 
-    def on_move_down(self):
-        if self.position < self.total:
-            idx = self.position - 1
-            self.app.priorities[idx], self.app.priorities[idx+1] = self.app.priorities[idx+1], self.app.priorities[idx]
-            save_priorities(self.app.priorities)
-            self.app.refresh_priority_screen()
+    def on_task_click(self, instance, touch):
+        if self.name_label.collide_point(*touch.pos):
+            self.app.show_task_actions(self.task['id'])
+            return True
+        return False
 
-    def on_mark_done(self):
-        task = find_task(self.app.tasks, self.task['id'])
-        if task:
-            task['done'] = True
-            if self.task['id'] in self.app.priorities:
-                self.app.priorities.remove(self.task['id'])
-            save_priorities(self.app.priorities)
-            save_tasks_local(self.app.tasks)
-            self.app.refresh_priority_screen()
-            self.app.refresh_tasks()
-            self.app.update_priority_button()
-
-    def on_remove(self):
-        if self.task['id'] in self.app.priorities:
+    def on_checkbox_change(self, instance, value):
+        self.task['done'] = value
+        save_tasks_local(self.app.tasks)
+        self.name_label.color = DONE_COLOR if value else FG_COLOR
+        if value and self.task['id'] in self.app.priorities:
             self.app.priorities.remove(self.task['id'])
             save_priorities(self.app.priorities)
             self.app.refresh_priority_screen()
-            self.app.refresh_tasks()
-            self.app.update_priority_button()
+        self.app.refresh_tasks()
+        self.app.update_priority_button()
 
 # --- Главный экран ---
 class MainScreen(Screen):
@@ -522,9 +512,10 @@ class TodoApp(App):
             return
         for idx, task_id in enumerate(self.priorities):
             task = find_task(self.tasks, task_id)
-            if task: self.priority_screen.list_container.add_widget(PriorityItem(task, idx + 1, len(self.priorities), self))
+            if task:
+                self.priority_screen.list_container.add_widget(PriorityItem(task, idx + 1, len(self.priorities), self))
 
-    # --- НОВОЕ: Меню действий по нажатию на дело ---
+    # --- Меню действий по нажатию на дело ---
     def show_task_actions(self, task_id):
         task = find_task(self.tasks, task_id)
         if not task: return
@@ -532,7 +523,6 @@ class TodoApp(App):
         popup = ModalView(size_hint=(0.9, 0.6))
         layout = BoxLayout(orientation='vertical', padding=dp(15), spacing=dp(10))
 
-        # Заголовок с названием дела
         title = Label(
             text=f"Дело: {task['name']}",
             font_size=dp(16), color=FG_COLOR,
@@ -542,10 +532,8 @@ class TodoApp(App):
         title.bind(size=title.setter('text_size'))
         layout.add_widget(title)
 
-        # Сетка кнопок 2x3
         btn_grid = BoxLayout(orientation='vertical', spacing=dp(8))
 
-        # Первый ряд
         row1 = BoxLayout(spacing=dp(8))
         edit_btn = Button(text="Изм.", background_color=BTN_ORANGE, color=(1,1,1,1), font_size=dp(14), bold=True)
         edit_btn.bind(on_press=lambda inst: (popup.dismiss(), self.show_edit_dialog(task_id)))
@@ -557,7 +545,6 @@ class TodoApp(App):
 
         btn_grid.add_widget(row1)
 
-        # Второй ряд
         row2 = BoxLayout(spacing=dp(8))
         delete_btn = Button(text="Удал.", background_color=BTN_RED, color=(1,1,1,1), font_size=dp(14), bold=True)
         delete_btn.bind(on_press=lambda inst: (popup.dismiss(), self.show_delete_confirm(task_id)))
@@ -569,7 +556,6 @@ class TodoApp(App):
 
         btn_grid.add_widget(row2)
 
-        # Третий ряд
         row3 = BoxLayout(spacing=dp(8))
         in_priority = task_id in self.priorities
         priority_btn = Button(
@@ -589,7 +575,6 @@ class TodoApp(App):
 
         layout.add_widget(btn_grid)
 
-        # Кнопка закрыть
         close_btn = Button(text="Закрыть", background_color=BTN_GRAY, color=(1,1,1,1), size_hint_y=None, height=dp(45), font_size=dp(14))
         close_btn.bind(on_press=lambda inst: popup.dismiss())
         layout.add_widget(close_btn)
